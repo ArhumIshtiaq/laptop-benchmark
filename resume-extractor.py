@@ -31,7 +31,6 @@ def load_internvl_model():
         model = AutoModel.from_pretrained(
             path,
             torch_dtype=torch.float16,
-            load_in_8bit=True,
             quantization_config=quantization_config,
             low_cpu_mem_usage=True,
             use_flash_attn=True,
@@ -43,7 +42,6 @@ def load_internvl_model():
         model = AutoModel.from_pretrained(
             path,
             torch_dtype=torch.float16,
-            load_in_8bit=True,
             low_cpu_mem_usage=True,
             use_flash_attn=True,
             trust_remote_code=True
@@ -54,19 +52,17 @@ def load_internvl_model():
 
 
 def extract_text_from_image(image_file, model, tokenizer, device):
-    """Extracts text and description from an image (optimized).  Uses provided example functions."""
+    """Extracts text and description from an image (optimized)."""
     IMAGENET_MEAN = (0.485, 0.456, 0.406)
     IMAGENET_STD = (0.229, 0.224, 0.225)
 
     def build_transform(input_size):
-        MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
-        transform = T.Compose([
+        return T.Compose([
             T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
             T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
             T.ToTensor(),
-            T.Normalize(mean=MEAN, std=STD)
+            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
         ])
-        return transform
 
     def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
         best_ratio_diff = float('inf')
@@ -110,14 +106,13 @@ def extract_text_from_image(image_file, model, tokenizer, device):
             )
             split_img = resized_img.crop(box)
             processed_images.append(split_img)
-        assert len(processed_images) == blocks  # Keep the assertion
         if use_thumbnail and len(processed_images) != 1:
             thumbnail_img = image.resize((image_size, image_size))
             processed_images.append(thumbnail_img)
         return processed_images
 
     def load_image(image_file, input_size=448, max_num=12):
-        image = Image.open(io.BytesIO(image_file.read())).convert('RGB') # Read from BytesIO
+        image = Image.open(io.BytesIO(image_file.read())).convert('RGB')
         transform = build_transform(input_size=input_size)
         images = dynamic_preprocess(image, image_size=input_size, use_thumbnail=True, max_num=max_num)
         pixel_values = [transform(image) for image in images]
@@ -127,13 +122,14 @@ def extract_text_from_image(image_file, model, tokenizer, device):
     pixel_values = load_image(image_file, max_num=12).to(torch.float16).to(device)
     generation_config = dict(max_new_tokens=1024, do_sample=True)
     question = '<image>\nPlease describe the image in detail and extract all text in the image'
-    response = model.chat(tokenizer, pixel_values, question, generation_config)
+    response = model.chat(tokenizer, pixel_values, question, generation_config) #Revert to chat for images
     return response
 
 def extract_data_batch(texts, model, tokenizer, device):
-    """Extracts data from a batch of resume texts."""
+    """Extracts data from a batch of resume texts. Uses text-only batch processing."""
     all_data = []
     prompts = []
+    data_templates = [] # Store data templates for each text
 
     for text in texts:
         data_template = {
@@ -152,6 +148,7 @@ def extract_data_batch(texts, model, tokenizer, device):
             'If employed, share company name?': 'Not Mentioned',
             'Type of job preferred': 'Not Mentioned'
         }
+        data_templates.append(data_template) #Keep track of the template
 
         prompt = f"""
 Extract the following information from the resume text below.
@@ -183,13 +180,12 @@ Type of job preferred: <job_type>
 """
         prompts.append(prompt)
 
-
     if hasattr(model, 'batch_chat'):
-        # Corrected batch_chat call for text-only input
-        responses = model.batch_chat(tokenizer, None, prompts, generation_config=dict(max_new_tokens=512, do_sample=False))
+        # Text-only batch processing.  Pass None for pixel_values and image_counts.
+        responses = model.batch_chat(tokenizer, None, questions=prompts, generation_config=dict(max_new_tokens=512, do_sample=False))
 
-        for response in responses:
-            data = data_template.copy()
+        for response, data_template in zip(responses, data_templates):
+            data = data_template.copy() # Use the correct data_template
             for line in response.strip().split("\n"):
                 try:
                     key, value = line.split(":", 1)
@@ -216,9 +212,9 @@ Type of job preferred: <job_type>
                 except ValueError:
                     pass
             all_data.append(data)
-    else: #Fallback
+    else: #Fallback to chat
         for prompt in prompts:
-            response = model.chat(tokenizer, None, prompt, dict(max_new_tokens=512, do_sample=False)) #Text only inference
+            response = model.chat(tokenizer, None, prompt, dict(max_new_tokens=512, do_sample=False)) #Use text-only chat
             data = data_template.copy()
             for line in response.strip().split("\n"):
                 try:
