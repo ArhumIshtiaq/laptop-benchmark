@@ -14,6 +14,8 @@ import os
 
 import torch
 from transformers import AutoTokenizer, AutoModel, BitsAndBytesConfig
+import torchvision.transforms as T
+from torchvision.transforms.functional import InterpolationMode
 
 def load_internvl_model():
     """Loads the InternVL model and tokenizer (optimized for RTX GPU)."""
@@ -29,6 +31,7 @@ def load_internvl_model():
         model = AutoModel.from_pretrained(
             path,
             torch_dtype=torch.float16,
+            load_in_8bit=True,
             quantization_config=quantization_config,
             low_cpu_mem_usage=True,
             use_flash_attn=True,
@@ -40,6 +43,7 @@ def load_internvl_model():
         model = AutoModel.from_pretrained(
             path,
             torch_dtype=torch.float16,
+            load_in_8bit=True,
             low_cpu_mem_usage=True,
             use_flash_attn=True,
             trust_remote_code=True
@@ -50,23 +54,19 @@ def load_internvl_model():
 
 
 def extract_text_from_image(image_file, model, tokenizer, device):
-    """Extracts text and description from an image (optimized)."""
-    from PIL import Image
-    import io
-    import torch
-    import torchvision.transforms as T
-    from torchvision.transforms.functional import InterpolationMode
-
+    """Extracts text and description from an image (optimized).  Uses provided example functions."""
     IMAGENET_MEAN = (0.485, 0.456, 0.406)
     IMAGENET_STD = (0.229, 0.224, 0.225)
 
     def build_transform(input_size):
-        return T.Compose([
+        MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
+        transform = T.Compose([
             T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
             T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
             T.ToTensor(),
-            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+            T.Normalize(mean=MEAN, std=STD)
         ])
+        return transform
 
     def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
         best_ratio_diff = float('inf')
@@ -110,16 +110,18 @@ def extract_text_from_image(image_file, model, tokenizer, device):
             )
             split_img = resized_img.crop(box)
             processed_images.append(split_img)
+        assert len(processed_images) == blocks  # Keep the assertion
         if use_thumbnail and len(processed_images) != 1:
             thumbnail_img = image.resize((image_size, image_size))
             processed_images.append(thumbnail_img)
         return processed_images
 
     def load_image(image_file, input_size=448, max_num=12):
-        image = Image.open(io.BytesIO(image_file.read())).convert('RGB')
+        image = Image.open(io.BytesIO(image_file.read())).convert('RGB') # Read from BytesIO
         transform = build_transform(input_size=input_size)
         images = dynamic_preprocess(image, image_size=input_size, use_thumbnail=True, max_num=max_num)
-        pixel_values = torch.stack([transform(img) for img in images])
+        pixel_values = [transform(image) for image in images]
+        pixel_values = torch.stack(pixel_values)
         return pixel_values
 
     pixel_values = load_image(image_file, max_num=12).to(torch.float16).to(device)
@@ -183,9 +185,8 @@ Type of job preferred: <job_type>
 
 
     if hasattr(model, 'batch_chat'):
-        # Corrected batch_chat call:  prompts is a positional argument
+        # Corrected batch_chat call for text-only input
         responses = model.batch_chat(tokenizer, None, prompts, generation_config=dict(max_new_tokens=512, do_sample=False))
-
 
         for response in responses:
             data = data_template.copy()
@@ -217,7 +218,7 @@ Type of job preferred: <job_type>
             all_data.append(data)
     else: #Fallback
         for prompt in prompts:
-            response = model.chat(tokenizer, None, prompt, dict(max_new_tokens=512, do_sample=False))
+            response = model.chat(tokenizer, None, prompt, dict(max_new_tokens=512, do_sample=False)) #Text only inference
             data = data_template.copy()
             for line in response.strip().split("\n"):
                 try:
