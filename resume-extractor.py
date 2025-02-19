@@ -184,6 +184,12 @@ Type of job preferred: <job_type>
         # Text-only batch processing.  Pass None for pixel_values and image_counts.
         responses = model.batch_chat(tokenizer, None, questions=prompts, generation_config=dict(max_new_tokens=512, do_sample=False))
 
+        if responses is None:  # Add this check!
+            print("Error: model.batch_chat returned None!")
+            st.error("Error: model.batch_chat returned None.  Check your inputs and model status.")
+            return []  # Return an empty list to prevent further errors
+
+
         for response, data_template in zip(responses, data_templates):
             data = data_template.copy() # Use the correct data_template
             for line in response.strip().split("\n"):
@@ -213,34 +219,43 @@ Type of job preferred: <job_type>
                     pass
             all_data.append(data)
     else: #Fallback to chat
+        all_data = [] # Ensure all_data is initialized
+
         for prompt in prompts:
             response = model.chat(tokenizer, None, prompt, dict(max_new_tokens=512, do_sample=False)) #Use text-only chat
-            data = data_template.copy()
-            for line in response.strip().split("\n"):
-                try:
-                    key, value = line.split(":", 1)
-                    key = key.strip()
-                    value = value.strip()
-                    key_mapping = {
-                        'Name': 'Name',
-                        'Contact number': 'Contact number',
-                        'Email address': 'Email address',
-                        'Gender': 'Gender',
-                        'Date of birth': 'Date of birth',
-                        'CNIC number': 'CNIC number',
-                        'Do you have any disability?': 'Do you have any disability?',
-                        'Select your city': 'Select your city',
-                        'Marital status': 'Marital status',
-                        'Education': 'Education',
-                        'Employment status': 'Employment status',
-                        'Years of experience': 'Years of experience',
-                        'If employed, share company name?': 'If employed, share company name?',
-                        'Type of job preferred': 'Type of job preferred'
-                    }
-                    if key in key_mapping:
-                        data[key_mapping[key]] = value
-                except ValueError:
-                    pass
+
+            if response is None:  # Add this check!
+                print("Error: model.chat returned None!")
+                st.error("Error: model.chat returned None for a prompt. Check your inputs and model status.")
+                continue  # Skip this prompt and move to the next
+
+            data = data_templates[prompts.index(prompt)].copy() #CORRECT data template
+            if response is not None: #added check here
+                for line in response.strip().split("\n"):
+                    try:
+                        key, value = line.split(":", 1)
+                        key = key.strip()
+                        value = value.strip()
+                        key_mapping = {
+                            'Name': 'Name',
+                            'Contact number': 'Contact number',
+                            'Email address': 'Email address',
+                            'Gender': 'Gender',
+                            'Date of birth': 'Date of birth',
+                            'CNIC number': 'CNIC number',
+                            'Do you have any disability?': 'Do you have any disability?',
+                            'Select your city': 'Select your city',
+                            'Marital status': 'Marital status',
+                            'Education': 'Education',
+                            'Employment status': 'Employment status',
+                            'Years of experience': 'Years of experience',
+                            'If employed, share company name?': 'If employed, share company name?',
+                            'Type of job preferred': 'Type of job preferred'
+                        }
+                        if key in key_mapping:
+                            data[key_mapping[key]] = value
+                    except ValueError:
+                        pass
             all_data.append(data)
 
     return all_data
@@ -318,8 +333,11 @@ def main():
             if all_texts:
                 with st.spinner('Processing resumes...'):
                     all_data = extract_data_batch(all_texts, model, tokenizer, device)
-                    df = pd.DataFrame(all_data)
-                    st.dataframe(df)
+                    if all_data: # Check if all_data is not empty
+                        df = pd.DataFrame(all_data)
+                        st.dataframe(df)
+                    else:
+                        st.warning("No data extracted.") #Handle empty all_data
             else:
                 st.warning("No resumes loaded successfully.")
 
